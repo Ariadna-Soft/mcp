@@ -2,22 +2,42 @@
   "name": "@smallmetrics/mcp-client",
   "version": "1.0.0",
   "description": "SSE to Stdio proxy for SmallMetrics MCP server",
-  "main": "dist/index.js",
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "bin": {
     "smallmetrics-mcp": "./dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc && chmod +x dist/index.js",
-    "test": "tsc --noEmit && node --test dist/config.test.js"
+    "test": "tsc --noEmit && node --test dist/config.test.js",
+    "prepublishOnly": "npm run build && npm test"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ariadna-Soft/mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Ariadna-Soft/mcp/issues"
+  },
+  "homepage": "https://smallmetrics.ai",
   "keywords": [
     "mcp",
+    "model-context-protocol",
+    "smallmetrics",
+    "sse",
+    "stdio",
     "proxy",
-    "smallmetrics"
+    "claude",
+    "cursor"
   ],
   "author": "SmallMetrics",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1"
   },
