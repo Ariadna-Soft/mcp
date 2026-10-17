@@ -8,7 +8,8 @@
  * allowing clients like Claude Desktop, Cursor, or Antigravity IDE to consume it natively.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
@@ -59,6 +60,58 @@ For more documentation, visit: https://github.com/Ariadna-Soft/mcp
 `);
 }
 
+/**
+ * Creates a JSON-RPC 2.0 error response for a failed request.
+ *
+ * @param id - Request ID from the incoming message
+ * @param message - Human-readable error description
+ * @param code - JSON-RPC error code (default: -32603 Internal error)
+ * @returns Formatted JSONRPCMessage
+ */
+export function createJsonRpcErrorResponse(
+  id: string | number,
+  message: string,
+  code = -32603
+): JSONRPCMessage {
+  return {
+    jsonrpc: "2.0",
+    id,
+    error: {
+      code,
+      message,
+    },
+  };
+}
+
+/**
+ * Checks if a message is a JSON-RPC request that expects a response.
+ *
+ * @param message - The incoming JSON-RPC message
+ * @returns True if message has a valid id (number or string)
+ */
+export function isRequestWithMessageId(
+  message: JSONRPCMessage
+): message is JSONRPCMessage & { id: string | number } {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    "id" in message &&
+    (typeof (message as { id?: unknown }).id === "string" ||
+      typeof (message as { id?: unknown }).id === "number")
+  );
+}
+
+/**
+ * Checks if an error represents an expired or lost session on the MCP server (HTTP 404).
+ *
+ * @param error - The caught error
+ * @returns True if the session was not found on the backend
+ */
+export function isSessionLostError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("404") || message.includes("Could not find session");
+}
+
 async function main(): Promise<void> {
   let targetUrl: string;
   let authToken: string;
@@ -102,11 +155,46 @@ async function main(): Promise<void> {
     // Initialize Stdio Server Transport (Connecting to IDE/Claude)
     const stdioTransport = new StdioServerTransport();
 
-    // Pipe messages from IDE to Django
-    stdioTransport.onmessage = (message: JSONRPCMessage) => {
-      sseTransport.send(message).catch((err: unknown) => {
-        console.error("Failed to send message to SSE:", err);
-      });
+    // Prevent zombie processes: when IDE parent closes stdin, terminate immediately
+    process.stdin.on("end", () => {
+      console.error("Stdin stream ended by parent process. Exiting.");
+      process.exit(0);
+    });
+    process.stdin.on("close", () => {
+      console.error("Stdin stream closed. Exiting.");
+      process.exit(0);
+    });
+
+    // Pipe messages from IDE to Django with immediate error response handling
+    stdioTransport.onmessage = async (message: JSONRPCMessage) => {
+      try {
+        await sseTransport.send(message);
+      } catch (err: unknown) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        console.error("Failed to send message to SSE:", errorMsg);
+
+        // If this message expects a response (has id), immediately return a JSON-RPC error
+        // to prevent the IDE from hanging for 3 minutes waiting for a response.
+        if (isRequestWithMessageId(message)) {
+          const errorResponse = createJsonRpcErrorResponse(
+            message.id,
+            `SmallMetrics MCP error: ${errorMsg}`
+          );
+          await stdioTransport.send(errorResponse).catch((sendErr: unknown) => {
+            console.error("Failed to deliver JSON-RPC error to stdio:", sendErr);
+          });
+        }
+
+        // If the backend session has expired or the server was restarted (HTTP 404),
+        // continuing to run with this dead session will cause all future calls to fail.
+        // Terminate the process cleanly so the IDE host process can launch a fresh instance.
+        if (isSessionLostError(err)) {
+          console.error(
+            "MCP session was lost on backend (HTTP 404). Terminating proxy to allow IDE to reinitialize clean session."
+          );
+          process.exit(1);
+        }
+      }
     };
 
     // Pipe messages from Django to IDE
@@ -132,6 +220,11 @@ async function main(): Promise<void> {
     // Handle errors
     sseTransport.onerror = (error: Error) => {
       console.error("SSE Transport Error:", error.message);
+      // If authentication failed, exit immediately so the user can fix the token
+      if (error.message.includes("401") || error.message.includes("Unauthorized")) {
+        console.error("Authentication failed against SmallMetrics API. Check your AUTHORIZATION token.");
+        process.exit(1);
+      }
     };
 
     stdioTransport.onerror = (error: Error) => {
@@ -163,7 +256,20 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch(error => {
-  console.error("Fatal proxy error:", error);
-  process.exit(1);
-});
+const isMainModule = (): boolean => {
+  if (!process.argv[1]) return false;
+  try {
+    const currentFile = fileURLToPath(import.meta.url);
+    const invokedFile = realpathSync(process.argv[1]);
+    return currentFile === invokedFile;
+  } catch {
+    return false;
+  }
+};
+
+if (isMainModule()) {
+  main().catch((error) => {
+    console.error("Fatal proxy error:", error);
+    process.exit(1);
+  });
+}

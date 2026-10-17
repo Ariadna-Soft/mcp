@@ -1,6 +1,6 @@
 {
   "name": "@smallmetrics/mcp-client",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "SSE to Stdio proxy for SmallMetrics MCP server",
   "type": "module",
   "main": "./dist/index.js",
@@ -16,7 +16,7 @@
   ],
   "scripts": {
     "build": "tsc && chmod +x dist/index.js",
-    "test": "tsc --noEmit && node --test dist/config.test.js",
+    "test": "tsc && node --test dist/config.test.js dist/proxy.test.js",
     "prepublishOnly": "npm run build && npm test"
   },
   "repository": {
