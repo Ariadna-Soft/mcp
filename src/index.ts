@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 
 /**
- * SmallMetrics MCP SSE to Stdio Proxy
+ * SmallMetrics MCP Streamable HTTP to Stdio Proxy
  * 
- * This script connects to the SmallMetrics Django MCP server via SSE,
+ * This script connects to the SmallMetrics Django MCP server via modern Streamable HTTP,
  * and proxies all JSON-RPC messages back and forth through standard IO,
- * allowing clients like Claude Desktop, Cursor, or Antigravity IDE to consume it natively.
+ * allowing clients like Claude Desktop, Cursor, or Antigravity IDE to consume it natively
+ * without stateful SSE session drops.
  */
 
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { parseConfig } from "./config.js";
@@ -34,15 +35,15 @@ function getPackageVersion(): string {
  */
 function printHelp(): void {
   console.log(`
-SmallMetrics MCP Client (SSE to Stdio Proxy)
+SmallMetrics MCP Client (Streamable HTTP to Stdio Proxy)
 
 Usage:
-  npx -y @smallmetrics/mcp-client <sse_url>
-  smallmetrics-mcp <sse_url>
+  npx -y @smallmetrics/mcp-client <endpoint_url>
+  smallmetrics-mcp <endpoint_url>
 
 Arguments:
-  <sse_url>    Target Server-Sent Events (SSE) endpoint of SmallMetrics MCP server
-               (e.g., https://api.smallmetrics.ai/api/v1/mcp/sse)
+  <endpoint_url>  Target endpoint of SmallMetrics MCP server
+                  (e.g., https://api.smallmetrics.ai/api/v1/mcp/sse)
 
 Options:
   -h, --help       Show this help message and exit
@@ -104,6 +105,8 @@ export function isRequestWithMessageId(
 /**
  * Checks if an error represents an expired or lost session on the MCP server (HTTP 404).
  *
+ * @deprecated In modern Streamable HTTP, communication is stateless and sessions are not dropped.
+ * Kept for backward compatibility.
  * @param error - The caught error
  * @returns True if the session was not found on the backend
  */
@@ -143,8 +146,8 @@ async function main(): Promise<void> {
   try {
     const url = new URL(targetUrl);
     
-    // Initialize SSE Client Transport (Connecting to Django Backend)
-    const sseTransport = new SSEClientTransport(url, {
+    // Initialize Streamable HTTP Client Transport (Connecting to Django Backend)
+    const streamableTransport = new StreamableHTTPClientTransport(url, {
       requestInit: {
         headers: {
           "Authorization": authToken,
@@ -168,10 +171,10 @@ async function main(): Promise<void> {
     // Pipe messages from IDE to Django with immediate error response handling
     stdioTransport.onmessage = async (message: JSONRPCMessage) => {
       try {
-        await sseTransport.send(message);
+        await streamableTransport.send(message);
       } catch (err: unknown) {
         const errorMsg = err instanceof Error ? err.message : String(err);
-        console.error("Failed to send message to SSE:", errorMsg);
+        console.error("Failed to send message to MCP server:", errorMsg);
 
         // If this message expects a response (has id), immediately return a JSON-RPC error
         // to prevent the IDE from hanging for 3 minutes waiting for a response.
@@ -184,42 +187,32 @@ async function main(): Promise<void> {
             console.error("Failed to deliver JSON-RPC error to stdio:", sendErr);
           });
         }
-
-        // If the backend session has expired or the server was restarted (HTTP 404),
-        // continuing to run with this dead session will cause all future calls to fail.
-        // Terminate the process cleanly so the IDE host process can launch a fresh instance.
-        if (isSessionLostError(err)) {
-          console.error(
-            "MCP session was lost on backend (HTTP 404). Terminating proxy to allow IDE to reinitialize clean session."
-          );
-          process.exit(1);
-        }
       }
     };
 
     // Pipe messages from Django to IDE
-    sseTransport.onmessage = (message: JSONRPCMessage) => {
+    streamableTransport.onmessage = (message: JSONRPCMessage) => {
       stdioTransport.send(message).catch((err: unknown) => {
         console.error("Failed to send message to Stdio:", err);
       });
     };
 
     // Handle closures
-    sseTransport.onclose = () => {
-      console.error("SSE connection closed by backend.");
+    streamableTransport.onclose = () => {
+      console.error("Streamable HTTP connection closed by backend.");
       stdioTransport.close().catch(() => {});
       process.exit(0);
     };
 
     stdioTransport.onclose = () => {
       console.error("Stdio connection closed by IDE.");
-      sseTransport.close().catch(() => {});
+      streamableTransport.close().catch(() => {});
       process.exit(0);
     };
 
     // Handle errors
-    sseTransport.onerror = (error: Error) => {
-      console.error("SSE Transport Error:", error.message);
+    streamableTransport.onerror = (error: Error) => {
+      console.error("Streamable HTTP Transport Error:", error.message);
       // If authentication failed, exit immediately so the user can fix the token
       if (error.message.includes("401") || error.message.includes("Unauthorized")) {
         console.error("Authentication failed against SmallMetrics API. Check your AUTHORIZATION token.");
@@ -231,14 +224,14 @@ async function main(): Promise<void> {
       console.error("Stdio Transport Error:", error.message);
     };
 
-    // Start transports: SSE first so backend is connected before IDE starts sending
-    await sseTransport.start();
+    // Start transports: streamable first so backend connection is verified before IDE starts sending
+    await streamableTransport.start();
     await stdioTransport.start();
 
     // Graceful shutdown on OS signals (Ctrl+C, termination)
     const handleSignal = () => {
       stdioTransport.close().catch(() => {});
-      sseTransport.close().catch(() => {});
+      streamableTransport.close().catch(() => {});
       process.exit(0);
     };
 

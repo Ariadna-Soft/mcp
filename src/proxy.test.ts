@@ -59,7 +59,7 @@ describe("JSON-RPC resilience helpers", () => {
     });
   });
 
-  describe("isSessionLostError", () => {
+  describe("isSessionLostError (deprecated backward compatibility)", () => {
     it("should return true when error message contains 404", () => {
       const error = new Error("Error POSTing to endpoint (HTTP 404): Could not find session");
       assert.strictEqual(isSessionLostError(error), true);
